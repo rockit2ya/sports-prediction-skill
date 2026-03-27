@@ -273,3 +273,5 @@ Use ridge regression against `fair_line_log` + `game_results_cache.json` to find
 6. **Don't hardcode.** Every number that might change goes in config with a fallback default.
 7. **Don't skip component logging.** Without `fair_line_log`, you cannot backtest. Period.
 8. **Don't over-engineer the model.** The market anchor does the heavy lifting. Your model's job is to find the 35% the market misses.
+9. **Verify safety gates actually block.** When implementing a gate that should prevent an action (e.g., AGREE gate blocking low-conviction picks), verify the blocked path produces a *different* output than the passed path. A gate that sets a flag but doesn't change the downstream recommendation is dead code. Discovered in NBA v3.65: gate-passed = 100% WR, gate-blocked = 40% WR, but blocked path still recommended BET.
+10. **Check fade destination injury burden.** Beyond checking if the fade destination is a historically bad team (#5), also check if that team is severely injured. Fading INTO a crippled team (star tax ≥ 8.0) is catastrophic (~20% WR) regardless of other signals. This catches edge cases where other guards (like lopsided detection) are suppressed.
