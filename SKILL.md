@@ -2,7 +2,7 @@
 
 ## Skill Purpose
 
-Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v3.60, 60.5% ATS).
+Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.0, modular architecture with ONE source of truth).
 
 **USE FOR:** building a new prediction engine for a sport, adding guard rails, implementing a fade evaluator, setting up market anchoring, creating a bet tracker, backtesting parameter changes, calibrating Judge rates.
 
@@ -275,3 +275,150 @@ Use ridge regression against `fair_line_log` + `game_results_cache.json` to find
 8. **Don't over-engineer the model.** The market anchor does the heavy lifting. Your model's job is to find the 35% the market misses.
 9. **Verify safety gates actually block.** When implementing a gate that should prevent an action (e.g., AGREE gate blocking low-conviction picks), verify the blocked path produces a *different* output than the passed path. A gate that sets a flag but doesn't change the downstream recommendation is dead code. Discovered in NBA v3.65: gate-passed = 100% WR, gate-blocked = 40% WR, but blocked path still recommended BET.
 10. **Check fade destination injury burden.** Beyond checking if the fade destination is a historically bad team (#5), also check if that team is severely injured. Fading INTO a crippled team (star tax ≥ 8.0) is catastrophic (~20% WR) regardless of other signals. This catches edge cases where other guards (like lopsided detection) are suppressed.
+11. **Never reimplement decision logic in diagnostic/replay tools.** Extract pure functions and call them from all consumers. Reimplementing the same computation in a test or replay script creates a parallel copy that silently diverges as the engine evolves — producing false confidence. Discovered in NBA v4.0: diagnostic was missing 6 rate modifiers and produced different verdicts than the engine on identical inputs. Fix: extract `check_guard_rails()`, `judge_verdict()`, `apply_shadow_override()` as shared functions.
+
+---
+
+## 8. Clean Architecture Pattern (ONE Source of Truth)
+
+Proven in NBA v4.0. Apply this pattern to every new prediction engine from day one.
+
+### 8.1 Core Principle
+
+**Every decision computation must exist in exactly one place.** The interactive engine, diagnostic tools, replay harnesses, and any future consumer all call the same extracted functions. Zero reimplementation, zero drift.
+
+### 8.2 Module Separation
+
+Organize code into three layers with strict dependency rules:
+
+```
+┌─────────────────────────────────────────────────┐
+│  ANALYTICS (pure logic, no I/O)                 │
+│  - Fair line calculation                        │
+│  - Guard rail evaluation                        │
+│  - Fade evaluator / Judge arbitration           │
+│  - Shadow override logic                        │
+│  - Edge & ECS scoring                           │
+│  All functions: data in → verdict out            │
+│  No print(), no input(), no file writes          │
+├─────────────────────────────────────────────────┤
+│  ENGINE UI (interactive I/O layer)              │
+│  - User prompts, display, menu navigation       │
+│  - Market line input, bet confirmation           │
+│  - Bet tracker CSV writes                        │
+│  - Calls analytics functions, formats output     │
+├─────────────────────────────────────────────────┤
+│  TOOLS (diagnostic, replay, tuning)             │
+│  - fade_judge_diagnostic: calls judge_verdict()  │
+│  - replay harness: calls all extracted functions │
+│  - auto_tune: reads fair_line_logs              │
+│  - post_mortem: reads bet_trackers              │
+│  All tools call analytics — never reimplement    │
+└─────────────────────────────────────────────────┘
+```
+
+**Dependency rule:** Tools → Analytics ✅ | Tools → UI ❌ | UI → Analytics ✅ | Analytics → UI ❌
+
+### 8.3 Function Extraction Pattern
+
+Every decision point in the pipeline should be an extracted function with this shape:
+
+```python
+def check_guard_rails(edge, ecs, team, opponent, star_tax, ..., model_params, guard_rails_config):
+    """Pure function. Returns dict with tags, shadow reasons, verdict."""
+    tags = []
+    # ... all logic here ...
+    return {
+        "tags": tags,
+        "is_shadow": len(tags) > 0,
+        "shadow_reasons": tags,
+        "details": {...}
+    }
+```
+
+**Rules for extracted functions:**
+1. **Pure** — No side effects. No file I/O, no global state mutation, no print().
+2. **Config as parameter** — Accept `model_params` and `guard_rails_config` as arguments. Never read config files inside the function.
+3. **Rich return dicts** — Return everything a consumer might need: verdict, reasons, intermediate values, rate breakdowns. Transparency enables debugging without reading source code.
+4. **Fallback defaults** — Every config read uses `config.get(key, default)` so the function works even with incomplete configs.
+
+### 8.4 Logging Discipline
+
+Replace all `print()` in analytics with Python's `logging` module:
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+# In functions:
+logger.info("Guard rail fired: %s (edge=%.1f, ecs=%d)", tag, edge, ecs)
+logger.debug("Judge rate cascade: base=%d, modifiers=%s, final=%d", base, mods, final)
+```
+
+**Why:**
+- `print()` in the analytics layer couples logic to the interactive console. Replay tools and diagnostics don't want console spam.
+- `logging` lets each consumer control verbosity: `logging.DEBUG` for diagnostics, `logging.WARNING` for production, `logging.CRITICAL` for silent replay.
+- Log messages become a debugging trail without touching the code.
+
+### 8.5 Replay Harness Design
+
+Every engine should have a **non-interactive replay harness** that:
+
+1. **Reads fair_line_log CSVs** — component-level data already logged during live sessions.
+2. **Calls the same extracted functions** — `check_guard_rails()` → `judge_verdict()` → `apply_shadow_override()`.
+3. **Resolves W/L** from `game_results_cache.json` — compares pick vs actual result.
+4. **Diffs against bet_tracker CSVs** — flags any mismatch between replay verdict and what was logged live.
+5. **Reports layer-by-layer WR** — Clean picks, SHADOW, FADE, OVERRIDE, each with W/L and WR%.
+
+```
+Replay pipeline:
+
+fair_line_log_*.csv          bet_tracker_*.csv
+       │                            │
+       ▼                            │
+  Reconstruct inputs                │
+       │                            │
+       ▼                            │
+  check_guard_rails()               │
+  judge_verdict()                   │
+  apply_shadow_override()           │
+       │                            │
+       ▼                            ▼
+  Replay verdicts  ──── DIFF ──── Logged verdicts
+       │
+       ▼
+  game_results_cache.json
+       │
+       ▼
+  W/L resolution → layer WR% report
+```
+
+**Why this matters:** When you change a parameter (e.g., raise `fade_threshold` by 5), you can replay the entire history through the REAL engine code and see exactly which bets flip and what the new WR would be — before shipping the change.
+
+### 8.6 Starter File Template
+
+For a new sport, create these files on day one:
+
+| File | Layer | Contents |
+|---|---|---|
+| `{sport}_analytics.py` | Analytics | Fair line calc, guard rails, fade evaluator, Judge, shadow override — all pure functions |
+| `{sport}_engine_ui.py` | UI | Interactive CLI, display, bet logging — calls analytics |
+| `{sport}_engine_replay.py` | Tools | Non-interactive replay harness — calls analytics |
+| `{sport}_diagnostic.py` | Tools | Fade/Judge calibration replay — calls analytics |
+| `model_config.json` | Config | All tunable parameters, guard rail thresholds, version |
+| `auto_tune.py` | Tools | Ridge regression parameter optimizer |
+| `post_mortem.py` | Tools | End-of-session performance report |
+| `preflight_check.py` | Tools | Pre-session data quality validation |
+
+### 8.7 Architecture Validation Checklist
+
+Before shipping any engine, verify:
+
+- [ ] **Zero decision logic in UI** — UI only formats and displays; all computation in analytics
+- [ ] **Zero decision logic in tools** — Diagnostic and replay call analytics functions; never reimplement
+- [ ] **Zero print() in analytics** — All output uses `logging`
+- [ ] **Config as parameter** — No function reads config files directly; config passed in
+- [ ] **Rich return dicts** — Every function returns enough data to debug without reading source
+- [ ] **Replay produces identical verdicts** — Run replay against bet_tracker; zero unexplained diffs
+- [ ] **Fair line log captures all components** — Cannot backtest what you didn't log
+- [ ] **Shadow bets logged at $0** — Guard rail accuracy requires tracking what was blocked
