@@ -278,7 +278,8 @@ Use ridge regression against `fair_line_log` + `game_results_cache.json` to find
 11. **Never reimplement decision logic in diagnostic/replay tools.** Extract pure functions and call them from all consumers. Reimplementing the same computation in a test or replay script creates a parallel copy that silently diverges as the engine evolves — producing false confidence. Discovered in NBA v4.0: diagnostic was missing 6 rate modifiers and produced different verdicts than the engine on identical inputs. Fix: extract `check_guard_rails()`, `judge_verdict()`, `apply_shadow_override()` as shared functions.
 12. **Audit blacklists regularly with hard data.** Blacklists decay. Teams improve mid-season, or your model learns to price them correctly. Run a per-team evidence table (model-pick WR%, fade-from WR%, fade-to WR%, shadow WR%) at least every 2 weeks. Remove teams where fading is losing money; add teams where the model consistently picks wrong AND fading from them is profitable. Discovered in NBA v3.67: PHX and MIL had been blacklisted but fading from them was 17–25% WR — the blacklist was actively destroying value.
 13. **Promote display-only indicators to guard rails.** If you built a scoring system that displays risk but doesn't block bets, you're wasting the signal. Wire it into the decision layer with a configurable threshold. Shadow-test at the threshold for 20+ bets before making it a hard block. Discovered in NBA v3.67: blowout risk scoring existed for months as display-only — games could score 85 blowout risk and still place real bets. Extracting it as a pure function and wiring `SHADOW:BLOWOUT_RISK` into guard rails turned dead information into actionable protection.
-14. **Momentum/form tracking adds no value when the market anchor is strong.** With market anchor weight ≥ 0.55, Vegas lines already capture streaks, momentum, and recent performance far more comprehensively than any simple ATS streak counter. Sequential same-team bet outcomes show 50/50 continuation rates (tested on 84 pairs). Engineering time is better spent on guard rail precision and fade calibration. Discovered in NBA v3.67 analysis: zero residual form signal after market anchor.
+14. **Build batch mode from day one using extracted functions.** Once your decision logic is extracted into pure functions (Section 8.3), building a batch/non-interactive runner is trivial — it just loops through all games and calls the same functions. This validates the architecture (if batch mode requires reimplementation, your extraction is incomplete). Use distinct entry ID prefixes (`B` for batch, `G` for interactive) to track provenance in bet trackers. Batch mode eliminates session drift (early vs late picks using different data freshness) and reduces a 20-30 minute interactive session to seconds. Discovered in NBA v4.1.1: batch generator calls are identical pipeline — zero logic divergence confirmed via replay.
+15. **Momentum/form tracking adds no value when the market anchor is strong.** With market anchor weight ≥ 0.55, Vegas lines already capture streaks, momentum, and recent performance far more comprehensively than any simple ATS streak counter. Sequential same-team bet outcomes show 50/50 continuation rates (tested on 84 pairs). Engineering time is better spent on guard rail precision and fade calibration. Discovered in NBA v3.67 analysis: zero residual form signal after market anchor.
 
 ---
 
@@ -406,6 +407,7 @@ For a new sport, create these files on day one:
 |---|---|---|
 | `{sport}_analytics.py` | Analytics | Fair line calc, guard rails, fade evaluator, Judge, shadow override — all pure functions |
 | `{sport}_engine_ui.py` | UI | Interactive CLI, display, bet logging — calls analytics |
+| `{sport}_batch_picks.py` | UI | Batch pick generator — runs full pipeline for every game on a slate, pre-fills bet tracker. Same extracted functions as interactive engine, zero reimplementation |
 | `{sport}_engine_replay.py` | Tools | Non-interactive replay harness — calls analytics |
 | `{sport}_diagnostic.py` | Tools | Fade/Judge calibration replay — calls analytics |
 | `model_config.json` | Config | All tunable parameters, guard rail thresholds, version |
@@ -423,5 +425,6 @@ Before shipping any engine, verify:
 - [ ] **Config as parameter** — No function reads config files directly; config passed in
 - [ ] **Rich return dicts** — Every function returns enough data to debug without reading source
 - [ ] **Replay produces identical verdicts** — Run replay against bet_tracker; zero unexplained diffs
+- [ ] **Batch mode produces identical verdicts** — Batch runner calls same functions as interactive; zero logic divergence
 - [ ] **Fair line log captures all components** — Cannot backtest what you didn't log
 - [ ] **Shadow bets logged at $0** — Guard rail accuracy requires tracking what was blocked
