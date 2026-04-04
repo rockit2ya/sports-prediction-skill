@@ -185,7 +185,7 @@ All data is **cached locally** (JSON/CSV). No live database required.
 | `bet_tracker_YYYY-MM-DD.csv` | Daily bet log (real, shadow, fade, override) |
 | `game_results_cache.json` | Actual results for backtesting |
 
-**Bet tracker columns:** Date, Matchup, Pick, MarketLine, FairLine, Edge, ECS, Stake, Notes (SHADOW:TAG), Result, ModelVersion.
+**Bet tracker columns:** Date, Matchup, Pick, MarketLine, FairLine, Edge, ECS, Stake, Notes (SHADOW:TAG), Result, ModelVersion. Add variant-specific columns (e.g., `Risky_Bet`, `Risky_ToWin` for alternative sizing strategies) rather than creating separate tracker files — see lesson #16.
 
 ---
 
@@ -280,6 +280,7 @@ Use ridge regression against `fair_line_log` + `game_results_cache.json` to find
 13. **Promote display-only indicators to guard rails.** If you built a scoring system that displays risk but doesn't block bets, you're wasting the signal. Wire it into the decision layer with a configurable threshold. Shadow-test at the threshold for 20+ bets before making it a hard block. Discovered in NBA v3.67: blowout risk scoring existed for months as display-only — games could score 85 blowout risk and still place real bets. Extracting it as a pure function and wiring `SHADOW:BLOWOUT_RISK` into guard rails turned dead information into actionable protection.
 14. **Build batch mode from day one using extracted functions.** Once your decision logic is extracted into pure functions (Section 8.3), building a batch/non-interactive runner is trivial — it just loops through all games and calls the same functions. This validates the architecture (if batch mode requires reimplementation, your extraction is incomplete). Use distinct entry ID prefixes (`B` for batch, `G` for interactive) to track provenance in bet trackers. Batch mode eliminates session drift (early vs late picks using different data freshness) and reduces a 20-30 minute interactive session to seconds. Discovered in NBA v4.1.1: batch generator calls are identical pipeline — zero logic divergence confirmed via replay.
 15. **Momentum/form tracking adds no value when the market anchor is strong.** With market anchor weight ≥ 0.55, Vegas lines already capture streaks, momentum, and recent performance far more comprehensively than any simple ATS streak counter. Sequential same-team bet outcomes show 50/50 continuation rates (tested on 84 pairs). Engineering time is better spent on guard rail precision and fade calibration. Discovered in NBA v3.67 analysis: zero residual form signal after market anchor.
+16. **Never create parallel tracker files for variant strategies — use columns.** If you add an alternative bet-sizing mode (e.g., quarter-Kelly on every pick), store variant data as extra columns in the existing tracker (`Risky_Bet`, `Risky_ToWin`) rather than a separate file. Parallel files create sync bugs: any code that updates one file must remember the other, and report logic must merge two sources. Columns in one file mean one write path, one update path, one report source. Empty columns for non-applicable rows are cheap; paired-file sync bugs are not. Discovered in NBA v4.3.1: dual tracker caused interactive updater to forget the paired risky file, and post-mortem shadow mask applied differently to each file.
 
 ---
 
