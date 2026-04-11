@@ -2,7 +2,7 @@
 
 ## Skill Purpose
 
-Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.0, modular architecture with ONE source of truth).
+Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.5.2, modular architecture with ONE source of truth, 11 forced pick optimization mechanisms).
 
 **USE FOR:** building a new prediction engine for a sport, adding guard rails, implementing a fade evaluator, setting up market anchoring, creating a bet tracker, backtesting parameter changes, calibrating Judge rates.
 
@@ -29,6 +29,7 @@ Sum N sport-specific components to produce a **projected spread** (or projected 
 | Rest / fatigue | B2B penalty, schedule density | Short week / bye week | Day game after night, doubleheaders | B2B, 3-in-4 nights | Midweek fixture congestion |
 | Key player impact | Star tax (on/off +/-) | QB injury model, skill position impact | Starting pitcher (ERA/FIP) + lineup WAR | Goalie strength, top-line injuries | Key player absence (xG contribution) |
 | Situational | Motivation (tanking), SOS | Divisional rivalry, weather, travel | Park factors, platoon splits, bullpen usage | Travel, altitude, rivalry | Derby matches, European competition fatigue |
+| Head-to-head | Season series record (±0.5–2.0 pts) | Divisional H2H (6 games/yr) | Season series, pitcher vs lineup | Season series | Recent meetings, home/away H2H |
 
 **Principles:**
 - **Regression to the mean** — Never use raw stats. Regress toward league average (typically 50–65% shrinkage) to prevent overfitting to small samples.
@@ -286,6 +287,7 @@ Use ridge regression against `fair_line_log` + `game_results_cache.json` to find
 
 19. **Gate auto-flip rules on objective independent signals.** If you have a rule that reverses the model's pick (auto-flip), don't let it fire on a single soft signal (e.g., "confidence is low, so flip"). The flip target might still be wrong. Add a second, independent, objective gate — e.g., only flip when the picked team's power rating is objectively much worse than the opponent's. The gate prevents flips where the model picked correctly despite low confidence. Discovered in NBA v4.4.7: NO_TRUST auto-flip fired on every ECS < 40 game (45.8% WR). Adding a NET rating gap gate (< -3) to confirm the model pick was actually weak raised flip WR to 62.5% and games blocked by the gate hit 76.9%.
 20. **Use dynamic classification from live data instead of static lists.** Any time you maintain a manual list of teams/players/situations (e.g., "strong teams" vs "weak teams"), automate it from the underlying rating data with configurable thresholds. Static lists get stale immediately — mid-season form changes make them wrong within weeks. Dynamic classification reads live data, uses threshold parameters from config, and falls back to static lists when data is unavailable. Add a preflight check that diffs live classification vs the static snapshot to surface movements. Discovered in NBA v4.4.7: static MEN/BOYS tiers had 5 top-10 NET teams classified as BOYS and 4 bottom-10 as MEN. Dynamic classification from live NET ratings with configurable thresholds (MEN ≥ 1.8, BOYS ≤ -4.0) corrected this automatically.
+21. **Use head-to-head matchup history as a multi-layer signal.** Season series records between specific teams capture intangible dynamics (matchup advantages, coaching adjustments, defensive schemes) that pure efficiency metrics miss. Integrate H2H at multiple layers: (a) fair line component (small adjustment, e.g. ±0.5–2.0 pts), (b) ECS signal (penalty when picking against dominant team), (c) auto-flip gate (block reversals that oppose matchup history). The fair line effect alone is marginal, but the interaction with other systems (ECS dropping below a gate threshold, blocking an auto-flip) creates cascading value. Require minimum sample (≥2 games) to prevent noise. Discovered in NBA v4.5.0: H2H integration converted 2 losses to wins on April 9 via two different mechanisms — ECS penalty caused a gate failure (BOS@NYK), and auto-flip gate blocked a bad reversal (LAL@GSW). Combined: 4W-2L → 6W-0L.
 
 ---
 
@@ -434,3 +436,21 @@ Before shipping any engine, verify:
 - [ ] **Batch mode produces identical verdicts** — Batch runner calls same functions as interactive; zero logic divergence
 - [ ] **Fair line log captures all components** — Cannot backtest what you didn't log
 - [ ] **Shadow bets logged at $0** — Guard rail accuracy requires tracking what was blocked
+
+### 8.8 Forced Bet Optimization Pattern (v4.5.2)
+
+When your engine has a `--force` mode (confirm ALL games including shadows), the forced pick path needs its own optimization layer. The Judge/fade evaluator is designed for BET/SHADOW contexts — it doesn't know about the "gun-to-head" constraint where you MUST bet every game.
+
+**Key principles:**
+1. **Triple consensus protection** — When model, fade evaluator, AND market all agree on the same side, skip all flip mechanisms. This is your highest-WR signal (78%+ in NBA). Don't second-guess it.
+2. **Injury-aware auto-flips** — Auto-flip rules that bypass rate modifiers (e.g., MAN→BOY tier flips) must check whether "strength" is current. A team's season NET/ATS record is stale when key players are OUT. Gate auto-flips with star tax thresholds.
+3. **Edge-based safety nets** — When model edge is near zero (< 2 pts), the model has no directional signal. A last-resort flip to the market favorite is better than trusting a coin-flip model pick. BUT require minimum market spread (|mkt| ≥ 3) to filter pick'em noise.
+4. **Blacklist coherence** — If the fade evaluator independently determined a team is unreliable ATS (blacklisted), don't let forced-pick flip mechanisms send picks TO that team.
+5. **SKIP side selection** — When the Judge produces SKIP (low conviction), don't blindly default to the model pick. Use signals: if NET_gap_suppress fired, flip to the NET-stronger side. If confidence is near zero, use market favorite as tiebreaker.
+6. **Config-gate everything** — Every forced pick mechanism gets an independent `enabled` toggle and tunable thresholds. This allows surgical rollback if a mechanism regresses.
+7. **Track `_original_forced`** — Before any flip mechanism fires, save the original forced pick. Use this to detect whether ANY prior flip already acted — prevents cascading double-flips.
+
+**Mechanism ordering matters:**
+- **Protection checks first** (triple consensus) — prevent good picks from being wrongly flipped
+- **Context-aware flips in the middle** (NT flip, market alignment, low-confidence flip)
+- **Safety nets last** (edge<2 flip) — only fires when nothing else did
