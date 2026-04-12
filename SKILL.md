@@ -2,7 +2,7 @@
 
 ## Skill Purpose
 
-Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.5.2, modular architecture with ONE source of truth, 11 forced pick optimization mechanisms).
+Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.5.3, modular architecture with ONE source of truth, 14 forced pick optimization mechanisms — 13 active).
 
 **USE FOR:** building a new prediction engine for a sport, adding guard rails, implementing a fade evaluator, setting up market anchoring, creating a bet tracker, backtesting parameter changes, calibrating Judge rates.
 
@@ -437,7 +437,7 @@ Before shipping any engine, verify:
 - [ ] **Fair line log captures all components** — Cannot backtest what you didn't log
 - [ ] **Shadow bets logged at $0** — Guard rail accuracy requires tracking what was blocked
 
-### 8.8 Forced Bet Optimization Pattern (v4.5.2)
+### 8.8 Forced Bet Optimization Pattern (v4.5.3)
 
 When your engine has a `--force` mode (confirm ALL games including shadows), the forced pick path needs its own optimization layer. The Judge/fade evaluator is designed for BET/SHADOW contexts — it doesn't know about the "gun-to-head" constraint where you MUST bet every game.
 
@@ -454,3 +454,8 @@ When your engine has a `--force` mode (confirm ALL games including shadows), the
 - **Protection checks first** (triple consensus) — prevent good picks from being wrongly flipped
 - **Context-aware flips in the middle** (NT flip, market alignment, low-confidence flip)
 - **Safety nets last** (edge<2 flip) — only fires when nothing else did
+
+**v4.5.3 lessons (replay-validated, 333 games across 43 dates):**
+8. **When the Judge says model is wrong, trust it.** For FADE games (Judge faded the model), forced pick MUST use the fade direction, not model direction. NBA evidence: model-dir = 30.2% vs fade-dir = 69.8% (n=43). The original n=13 sample was misleading — always validate with full replay before shipping.
+9. **Judge labels reveal forced-pick failure modes.** When the Judge assigns low-confidence labels (no_trust, injury_mismatch, multi_tag) but produces SKIP, the model pick is empirically wrong. Flip forced pick to the opponent for these labels. NBA evidence: combined 42W-20L (67.7%) after flipping.
+10. **Small samples kill.** v4.5.2 shipped fade_forced_reversal based on n=13 (30.8%). Full pipeline replay (n=43) proved the OPPOSITE direction was correct. Always build cache-faithful replay infrastructure (archive all daily caches) and validate against the full dataset before committing directional changes.
