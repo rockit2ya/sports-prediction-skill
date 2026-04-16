@@ -2,7 +2,7 @@
 
 ## Skill Purpose
 
-Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.5.3, modular architecture with ONE source of truth, 14 forced pick optimization mechanisms — 13 active).
+Guide the creation and tuning of a **spread/line prediction engine** for any sport (NBA, NFL, MLB, NHL, Soccer). This skill captures the architecture, methodology, and tuning discipline proven in the NBA Prediction Engine (v4.8.0, modular architecture with ONE source of truth, 14 forced pick optimization mechanisms — 13 active, analytical confidence modifiers bridging parallel decision pipelines, injury mismatch cap preventing signal double-counting).
 
 **USE FOR:** building a new prediction engine for a sport, adding guard rails, implementing a fade evaluator, setting up market anchoring, creating a bet tracker, backtesting parameter changes, calibrating Judge rates.
 
@@ -118,6 +118,47 @@ Final rate < fade_threshold → ALIGNED (go with model)
 ```
 
 The rates are **empirically calibrated** from your shadow bet history. Start with 50/50 and adjust based on actual WR data per tag.
+
+### 1.7 Two Paths — Discipline vs. Conviction
+
+The engine serves two fundamentally different modes of operation. Every architectural decision must account for both.
+
+#### The Safe Path (non-forced)
+
+The default mode. Guard rails shadow-block uncertain games. The Judge skips low-conviction matchups. Discipline preserves bankroll and win rate.
+
+**Philosophy:** Not every game deserves your money. When the model is unsure, the fade evaluator is split, or the signals conflict — the right answer is to walk away. Shadow the bet at $0, log it for backtesting, and move on. A 58% win rate on 8 games beats a 52% win rate on 14. This path exists to protect you from the games the engine doesn't understand well enough to have an edge.
+
+**The safe path accepts these costs:**
+- Missed winners that guard rails blocked (the price of avoiding the losers those rails also caught)
+- Lower volume (fewer bets per slate)
+- Occasional frustration when a shadowed game would have covered
+
+These costs are acceptable because the alternative — betting every game at reduced accuracy — is how bankrolls die.
+
+#### The Gun-to-Head Path (forced / `--force`)
+
+When you MUST bet every game on the slate — no skipping, no shadows, no walking away. This is the risky path where the engine has no choice but to find the best possible side for every matchup, including the ones it would normally refuse to touch.
+
+**Philosophy:** When retreat is not an option, you attack with everything you have. The forced path activates every analytical signal the engine possesses — defense quality, ATS tiers, historical team WR, injury asymmetry, head-to-head matchup history, market alignment — and synthesizes them into a conviction score. Games the safe path would skip become puzzles the forced path must solve.
+
+**The forced path demands:**
+- **Signal depth parity with the Judge** — The forced pick pipeline must see every signal class the Judge uses. If the Judge evaluates 16 modifier classes, the forced confidence scorer must evaluate equivalent information, expressed as confidence adjustments rather than fade-rate modifiers. A forced path with fewer signals than the Judge is making blind decisions.
+- **Triple consensus protection** — When model, fade, and market all agree, that alignment is sacred. No flip mechanism overrides it.
+- **Injury-aware tier logic** — "Strong team" labels from season-long NET ratings are stale when key players sit. Gate strength-based auto-flips on current injury burden.
+- **Last-resort market fallback** — When the model has zero directional signal (edge < 2), defer to the market favorite. The market is never perfect, but it's better than a coin flip.
+
+#### The Judge's Ultimate Responsibility
+
+The Judge is the final arbiter of truth in both paths. The model proposes. The fade evaluator challenges. **The Judge decides.**
+
+In the safe path, the Judge resolves model–fade disagreements: ALIGNED (trust the model), FADE (trust the fade), or SKIP (trust neither). In the forced path, the Judge's labels, rates, and verdicts become the foundation for forced pick side selection — `tier_flip` labels lock picks, `no_trust`/`injury_mismatch`/`multi_tag` labels trigger flips, and the rate cascade determines which direction has more empirical support.
+
+**The Judge must be scrupulous.** Every pick from the model and every recommendation from the fade evaluator passes through the Judge's scrutiny. The Judge doesn't rubber-stamp — it re-evaluates. It applies 16+ modifier classes: direction gates, ECS floors, tight-line boosts, away-dog penalties, defense quality, H2H matchup history, ATS tier classifications, final-pick team WR, NET gap analysis, fade destination health, injury asymmetry, large-spread adjustments, and blacklist coherence checks. Each modifier is empirically calibrated from historical outcome data — not intuition, not theory, not vibes.
+
+**The Judge's wisdom compounds.** Rate modifiers that individually shift a fade rate by ±3–5 points can stack to swing a verdict by 20+ points. A game that starts at base rate 52 (coin flip territory) might land at 78 after the cascade reveals: fading toward an elite defense (+4), elite ATS tier team (+3), historically hot final-pick WR (+4), opponent has high injury burden (+5), NET gap confirms fade direction (+5), and the model opposes market direction (+5). That's not one signal — it's six independent signals converging on the same truth. The Judge sees all of them simultaneously.
+
+**The Judge owns the outcome.** When a forced bet loses, the question is always: did the Judge have enough information? If a signal existed that the Judge didn't evaluate, that's an architecture gap to close (v4.6.1 closed four such gaps). If the Judge saw everything and still picked wrong, that's variance — irreducible noise in a probabilistic game. The goal is never 100% accuracy; it's ensuring every decision was made with maximum available information.
 
 ---
 
@@ -288,6 +329,9 @@ Use ridge regression against `fair_line_log` + `game_results_cache.json` to find
 19. **Gate auto-flip rules on objective independent signals.** If you have a rule that reverses the model's pick (auto-flip), don't let it fire on a single soft signal (e.g., "confidence is low, so flip"). The flip target might still be wrong. Add a second, independent, objective gate — e.g., only flip when the picked team's power rating is objectively much worse than the opponent's. The gate prevents flips where the model picked correctly despite low confidence. Discovered in NBA v4.4.7: NO_TRUST auto-flip fired on every ECS < 40 game (45.8% WR). Adding a NET rating gap gate (< -3) to confirm the model pick was actually weak raised flip WR to 62.5% and games blocked by the gate hit 76.9%.
 20. **Use dynamic classification from live data instead of static lists.** Any time you maintain a manual list of teams/players/situations (e.g., "strong teams" vs "weak teams"), automate it from the underlying rating data with configurable thresholds. Static lists get stale immediately — mid-season form changes make them wrong within weeks. Dynamic classification reads live data, uses threshold parameters from config, and falls back to static lists when data is unavailable. Add a preflight check that diffs live classification vs the static snapshot to surface movements. Discovered in NBA v4.4.7: static MEN/BOYS tiers had 5 top-10 NET teams classified as BOYS and 4 bottom-10 as MEN. Dynamic classification from live NET ratings with configurable thresholds (MEN ≥ 1.8, BOYS ≤ -4.0) corrected this automatically.
 21. **Use head-to-head matchup history as a multi-layer signal.** Season series records between specific teams capture intangible dynamics (matchup advantages, coaching adjustments, defensive schemes) that pure efficiency metrics miss. Integrate H2H at multiple layers: (a) fair line component (small adjustment, e.g. ±0.5–2.0 pts), (b) ECS signal (penalty when picking against dominant team), (c) auto-flip gate (block reversals that oppose matchup history). The fair line effect alone is marginal, but the interaction with other systems (ECS dropping below a gate threshold, blocking an auto-flip) creates cascading value. Require minimum sample (≥2 games) to prevent noise. Discovered in NBA v4.5.0: H2H integration converted 2 losses to wins on April 9 via two different mechanisms — ECS penalty caused a gate failure (BOS@NYK), and auto-flip gate blocked a bad reversal (LAL@GSW). Combined: 4W-2L → 6W-0L.
+22. **Keep parallel decision pipelines at signal parity.** If your engine has two pipelines making decisions about the same games (e.g., one for "should we bet?" and another for "which side forced?"), the second pipeline must evaluate the same signal classes as the first — otherwise it makes uninformed decisions the primary pipeline would have caught. Express the signals differently (confidence adjustments vs rate modifiers) but ensure the same information flows into both paths. Config-gate each independently for surgical rollback. Discovered in NBA v4.6.1: forced pick confidence used ~11 signals while Judge had 35+; April 14 playoffs 0-2 forced bets where model was right. Injecting 4 missing signal classes closed the gap without breaking existing protections (676-game replay: zero regressions).
+23. **Data-reject fixes that harm profitable guardrails.** When a proposed fix looks logically correct but backtesting shows it inverts a profitable existing pattern, reject it — the existing mechanism may capture the same information through a different pathway (e.g., market alignment embeds team strength that a model-pick gate would try to replicate). Always validate against the full historical dataset. Discovered in NBA v4.6.1: AGREE+WITH market protection was 21W-9L (70.0%); proposed model-pick gate would have inverted it to 9W-21L (30.0%).
+24. **Prevent signal double-counting across layers in multi-layer cascades.** When a decision cascade has a base rate category (e.g., "injury mismatch" at rate 42) AND tag-based overrides (e.g., "INJURY_QUALITY" at rate 60), the override can contradict the base rate if both encode the same underlying signal. The base rate says "fading injury-mismatched games is sub-breakeven" — but the injury-tagged override boosts the rate upward, effectively double-counting the injury signal. Then stacking modifiers (away-dog +4, final-pick WR +4/+5) push past the decision threshold. Fix: when a base rate category already prices in a signal class (injuries, matchup quality, etc.), block tag overrides from the SAME signal class from overriding upward. Non-overlapping tag overrides (confidence conflicts, daily caps, blacklist) remain unaffected. Config-gate with an independent toggle so it can be disabled if it regresses. Discovered in NBA v4.8.0: injury_mismatch base rate 42 + INJURY_QUALITY override 60 + modifiers → rate 73 (above threshold 70) → wrong FADE on GSW +5.5 (GSW won outright by 10.5). Adding injury_mismatch_cap blocked IQ override → rate 45 → correct ALIGNED verdict. Zero regressions across full corpus.
 
 ---
 
@@ -459,3 +503,5 @@ When your engine has a `--force` mode (confirm ALL games including shadows), the
 8. **When the Judge says model is wrong, trust it.** For FADE games (Judge faded the model), forced pick MUST use the fade direction, not model direction. NBA evidence: model-dir = 30.2% vs fade-dir = 69.8% (n=43). The original n=13 sample was misleading — always validate with full replay before shipping.
 9. **Judge labels reveal forced-pick failure modes.** When the Judge assigns low-confidence labels (no_trust, injury_mismatch, multi_tag) but produces SKIP, the model pick is empirically wrong. Flip forced pick to the opponent for these labels. NBA evidence: combined 42W-20L (67.7%) after flipping.
 10. **Small samples kill.** v4.5.2 shipped fade_forced_reversal based on n=13 (30.8%). Full pipeline replay (n=43) proved the OPPOSITE direction was correct. Always build cache-faithful replay infrastructure (archive all daily caches) and validate against the full dataset before committing directional changes.
+11. **Bridge signal depth between parallel decision pipelines.** When two pipelines make decisions about the same games (e.g., Judge picks vs forced picks), keep their analytical depth in parity. If the primary pipeline evaluates 16 modifier classes (defense quality, ATS tiers, final-pick WR, injury asymmetry), the secondary pipeline must see the same signals — even if expressed differently (confidence adjustments instead of rate modifiers). Without parity, the secondary pipeline makes blind decisions that the primary would have caught. Config-gate each modifier class independently (`enabled` toggle + thresholds) so you can disable any that regress. NBA evidence (v4.6.1): forced picks lacked 4 signal classes the Judge used; injecting them as `_forced_analytical_modifiers()` into `compute_forced_confidence()` closed the gap. Data-rejected one proposed fix (AGREE+WITH gate: 21W-9L → 9W-21L) because the existing protection captured the same information through market pricing.
+12. **Data-reject proposals that harm working protections.** When a fix looks logically sound but backtesting shows it destroys a profitable existing pattern, reject it — the existing pattern may capture the same information through a different mechanism (e.g., market alignment captures team strength that a model-pick gate would duplicate). Always test proposed changes against the full historical dataset before shipping. NBA evidence: AGREE+WITH market protection was 21W-9L (70.0%); proposed model-pick gate would have inverted it to 9W-21L (30.0%).
